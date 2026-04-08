@@ -1,0 +1,399 @@
+@page "/"
+
+@using CosmoCal.Services
+@inject SubscriptionService SubService
+@inject WindowControlService WinSvc
+@implements IDisposable
+
+@* CosmoCal — Space-Themed Calculator Page *@
+@* Handles all UI state: display, button presses, subscription purchasing, and timer *@
+
+<div @ref="mainDiv" tabindex="0" style="outline: none;" @onkeydown="HandleKeyDown" class="cosmos-bg @(SubService.IsActive ? "subscribed-bg" : "")">
+
+    @* ── Custom Title Bar ─────────────────────────────────────── *@
+    <div class="custom-titlebar">
+        <div class="titlebar-brand">
+            <span class="titlebar-icon">✦</span>
+            <span class="titlebar-name">CosmoCal</span>
+        </div>
+        <div class="titlebar-controls">
+            <button class="titlebar-btn btn-tb-minimize" @onclick="WinSvc.RequestMinimize" title="Minimize">
+                <span class="tb-icon">&#8722;</span>
+            </button>
+            <button class="titlebar-btn btn-tb-maximize" @onclick="WinSvc.RequestMaximizeRestore" title="Maximize">
+                <span class="tb-icon">&#9633;</span>
+            </button>
+            <button class="titlebar-btn btn-tb-close" @onclick="WinSvc.RequestClose" title="Close">
+                <span class="tb-icon">&#215;</span>
+            </button>
+        </div>
+    </div>
+
+    @* ── Background layers ────────────────────────────────────── *@
+    <div class="starfield">
+        @for (int i = 0; i < 60; i++)
+        {
+            <div class="star" style="@GetStarStyle(i)"></div>
+        }
+    </div>
+
+    <!-- Falling stars -->
+    <div class="falling-stars">
+        @for (int i = 0; i < 15; i++)
+        {
+            <div class="falling-star" style="@GetFallingStarStyle(i)"></div>
+        }
+    </div>
+
+
+    <!-- Moon decoration -->
+    <div class="moon-deco"></div>
+    <!-- Planet decoration -->
+    <div class="planet-deco"></div>
+
+    @* ── Main calculator card (wrapped for centered flex layout) ── *@
+    <div class="cosmos-content">
+        <div class="calc-card @(_unlockEffect ? "unlock-flash" : "") @(SubService.IsActive ? "subscribed-card" : "")">
+
+            <!-- Header -->
+            <div class="calc-header">
+                <h1 class="calc-title">COSMO CALC</h1>
+                <div class="sub-status">
+                    <span class="status-dot @(SubService.IsActive ? "active" : "")"></span>
+                    <span class="status-text @(SubService.IsActive ? "active" : "")">
+                        @(SubService.IsActive ? "SUBSCRIBED" : "UNSUBSCRIBED")
+                    </span>
+                </div>
+            </div>
+
+            <!-- Display -->
+            <div class="calc-display">
+                <div class="expr-bar">
+                    <div class="expr-line">@GetFullExpression()</div>
+                </div>
+                <div class="value-line @(_displayClass)">@_displayValue</div>
+                @if (!string.IsNullOrEmpty(_sarcasmMessage))
+                {
+                    <div class="sarcasm-msg">@_sarcasmMessage</div>
+                }
+            </div>
+
+            <!-- Buttons grid -->
+            <div class="buttons-grid">
+                <!-- Row 1 -->
+                <button class="btn btn-clear" @onclick="() => PressButton('C')">AC</button>
+                <button class="btn btn-op"    @onclick="() => PressButton('±')">+/-</button>
+                <button class="btn btn-op"    @onclick="() => PressButton('%')">%</button>
+                <button class="btn btn-op"    @onclick="() => PressButton('/')">÷</button>
+                <!-- Row 2 -->
+                <button class="btn" @onclick="() => PressButton('7')">7</button>
+                <button class="btn" @onclick="() => PressButton('8')">8</button>
+                <button class="btn" @onclick="() => PressButton('9')">9</button>
+                <button class="btn btn-op" @onclick="() => PressButton('*')">×</button>
+                <!-- Row 3 -->
+                <button class="btn" @onclick="() => PressButton('4')">4</button>
+                <button class="btn" @onclick="() => PressButton('5')">5</button>
+                <button class="btn" @onclick="() => PressButton('6')">6</button>
+                <button class="btn btn-op" @onclick="() => PressButton('-')">−</button>
+                <!-- Row 4 -->
+                <button class="btn" @onclick="() => PressButton('1')">1</button>
+                <button class="btn" @onclick="() => PressButton('2')">2</button>
+                <button class="btn" @onclick="() => PressButton('3')">3</button>
+                <button class="btn btn-op" @onclick="() => PressButton('+')">+</button>
+                <!-- Row 5 -->
+                <button class="btn btn-zero" @onclick="() => PressButton('0')">0</button>
+                <button class="btn" @onclick="() => PressButton('.')">.</button>
+                <button class="btn btn-equals" @onclick="() => PressButton('=')">＝</button>
+            </div>
+
+            <!-- Subscription section -->
+            <div class="sub-section">
+                @if (SubService.IsActive)
+                {
+                    <div class="timer active">
+                        EXPIRES IN: @SubService.FormattedTimeRemaining()
+                    </div>
+                    <button class="buy-btn active" disabled>✓ SUBSCRIBED</button>
+                }
+                else
+                {
+                    <div class="timer">-- SUBSCRIPTION INACTIVE --</div>
+                    <button class="buy-btn @(_purchasing ? "processing" : "")"
+                            @onclick="BuySubscription"
+                            disabled="@_purchasing">
+                        @(_purchasing ? "⠙ PROCESSING..." : "✦ BUY SUBSCRIPTION ✦")
+                    </button>
+                }
+                <div class="price-note">₹100 / DAY · 24-HOUR ACCESS</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    // ── Calculator state ──────────────────────────────────────────────
+    private string _displayValue = "0";
+    private string _lastFullExpression = "";
+    private string _sarcasmMessage = "";
+    private string _displayClass = "";   // "correct" | "wrong" | ""
+    private bool   _unlockEffect = false;
+    private bool   _purchasing = false;
+
+    private double? _prevValue = null;
+    private char?   _pendingOp = null;
+    private bool    _awaitingOperand = false;
+    private bool    _justEvaluated = false;
+
+    private readonly CalculatorEngine _engine = new();
+    private System.Timers.Timer? _uiTimer;
+
+    // ── Lifecycle ─────────────────────────────────────────────────────
+    protected override void OnInitialized()
+    {
+        // Tick every second to update the countdown timer
+        _uiTimer = new System.Timers.Timer(1000);
+        _uiTimer.Elapsed += (_, _) =>
+        {
+            SubService.Tick();
+            InvokeAsync(StateHasChanged);  // Push UI update to Blazor
+        };
+        _uiTimer.Start();
+
+        SubService.OnStateChanged += HandleSubChanged;
+    }
+
+    private async void HandleSubChanged()
+    {
+        // Subscription activated or expired — refresh UI
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        _uiTimer?.Stop();
+        _uiTimer?.Dispose();
+        SubService.OnStateChanged -= HandleSubChanged;
+    }
+
+    private ElementReference mainDiv;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await mainDiv.FocusAsync();
+        }
+    }
+
+    private void HandleKeyDown(Microsoft.AspNetCore.Components.Web.KeyboardEventArgs e)
+    {
+        if (e.Key.Length == 1 && char.IsDigit(e.Key[0]))
+        {
+            PressButton(e.Key[0]);
+        }
+        else if (e.Key == "+" || e.Key == "-" || e.Key == "*" || e.Key == "/")
+        {
+            PressButton(e.Key[0]);
+        }
+        else if (e.Key == "Enter" || e.Key == "=")
+        {
+            PressButton('=');
+        }
+        else if (e.Key == "Escape" || e.Key == "Delete" || e.Key == "Backspace")
+        {
+            PressButton('C');
+        }
+        else if (e.Key == ".")
+        {
+            PressButton('.');
+        }
+    }
+
+    // ── Button handler ────────────────────────────────────────────────
+    private void PressButton(char key)
+    {
+        _sarcasmMessage = "";
+
+        switch (key)
+        {
+            // Clear all
+            case 'C':
+                _displayValue = "0";
+                _lastFullExpression = "";
+                _prevValue = null;
+                _pendingOp = null;
+                _awaitingOperand = false;
+                _justEvaluated = false;
+                _displayClass = "";
+                break;
+
+            // Sign flip
+            case '±':
+                if (double.TryParse(_displayValue, out double sv))
+                    _displayValue = (-sv).ToString("G10");
+                break;
+
+            // Percent
+            case '%':
+                if (double.TryParse(_displayValue, out double pv))
+                    _displayValue = (pv / 100.0).ToString("G10");
+                break;
+
+            // Decimal point
+            case '.':
+                if (_awaitingOperand || _justEvaluated)
+                {
+                    _displayValue = "0.";
+                    _awaitingOperand = false;
+                    _justEvaluated = false;
+                }
+                else if (!_displayValue.Contains('.'))
+                    _displayValue += '.';
+                break;
+
+            // Operators
+            case '+': case '-': case '*': case '/':
+                HandleOperator(key);
+                break;
+
+            // Equals
+            case '=':
+                HandleEquals();
+                break;
+
+            // Digits 0–9
+            default:
+                if (char.IsDigit(key))
+                    HandleDigit(key);
+                break;
+        }
+
+        _displayClass = "";   // Reset colour on regular input
+    }
+
+    private void HandleDigit(char digit)
+    {
+        if (_awaitingOperand || _justEvaluated)
+        {
+            _displayValue = digit.ToString();
+            _awaitingOperand = false;
+            _justEvaluated = false;
+        }
+        else
+        {
+            // Limit display to 10 chars to prevent overflow
+            if (_displayValue.Length < 10)
+                _displayValue = (_displayValue == "0") ? digit.ToString() : _displayValue + digit;
+        }
+    }
+
+    private void HandleOperator(char op)
+    {
+        // If we already have a pending op and fresh input, evaluate chain
+        if (_pendingOp.HasValue && !_awaitingOperand && !_justEvaluated)
+            Evaluate(chain: true);
+
+        _prevValue = double.TryParse(_displayValue, out double d) ? d : 0;
+        _pendingOp = op;
+        _awaitingOperand = true;
+        _justEvaluated = false;
+    }
+
+    private void HandleEquals()
+    {
+        if (!_pendingOp.HasValue || _prevValue is null) return;
+        _lastFullExpression = GetFullExpression();
+        Evaluate(chain: false);
+        _pendingOp = null;
+        _prevValue = null;
+        _justEvaluated = true;
+    }
+
+    private string GetFullExpression()
+    {
+        if (_justEvaluated) return $"{_lastFullExpression} =";
+        
+        string pending = "";
+        if (_prevValue.HasValue && _pendingOp.HasValue)
+        {
+            string opLabel = _pendingOp.Value switch { '+' => "+", '-' => "−", '*' => "×", '/' => "÷", _ => _pendingOp.Value.ToString() };
+            pending = $"{_prevValue.Value} {opLabel} ";
+        }
+        
+        if (_awaitingOperand) return pending;
+        return pending + _displayValue;
+    }
+
+    private void Evaluate(bool chain)
+    {
+        if (!_prevValue.HasValue || !_pendingOp.HasValue) return;
+        if (!double.TryParse(_displayValue, out double b)) return;
+
+        // ── The key call: correct vs. wrong based on subscription ──
+        var (result, isWrong, msg) = _engine.Compute(
+            _prevValue.Value, b, _pendingOp.Value, SubService.IsActive);
+
+        _sarcasmMessage = msg ?? "";
+        _displayValue = FormatResult(result);
+        _displayClass = isWrong ? "wrong" : "correct";
+
+        // If chaining operators, set the result as new left operand
+        if (chain)
+            _prevValue = result;
+    }
+
+    // ── Subscription purchase ─────────────────────────────────────────
+    private async Task BuySubscription()
+    {
+        _purchasing = true;
+        StateHasChanged();
+
+        bool success = await SubService.PurchaseAsync();
+
+        if (success)
+        {
+            // Trigger the visual unlock effect briefly
+            _unlockEffect = true;
+            StateHasChanged();
+            await Task.Delay(1500);
+            _unlockEffect = false;
+        }
+
+        _purchasing = false;
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────
+    private static string FormatResult(double value)
+    {
+        if (double.IsPositiveInfinity(value)) return "∞";
+        if (double.IsNegativeInfinity(value)) return "-∞";
+        if (double.IsNaN(value)) return "ERROR";
+        // Keep it readable: up to 10 significant figures, trim trailing zeros
+        return value.ToString("G10").Length > 12
+            ? value.ToString("G6")
+            : value.ToString("G10");
+    }
+
+    // Generate varied CSS styles for each star (pure inline — no JS needed)
+    private static string GetStarStyle(int index)
+    {
+        var rng = new Random(index * 37 + 13);   // deterministic per star
+        double size  = rng.NextDouble() * 2.5 + 0.5;
+        double left  = rng.NextDouble() * 100;
+        double top   = rng.NextDouble() * 100;
+        double dur   = rng.NextDouble() * 3 + 1.5;
+        double delay = rng.NextDouble() * 4;
+        double opacity = rng.NextDouble() * 0.5 + 0.2;
+        return $"width:{size:F1}px;height:{size:F1}px;left:{left:F1}%;top:{top:F1}%;" +
+               $"animation-duration:{dur:F1}s;animation-delay:{delay:F1}s;opacity:{opacity:F2};";
+    }
+
+    private static string GetFallingStarStyle(int index)
+    {
+        var rng = new Random(index * 97 + 23);
+        double left = rng.NextDouble() * 100;
+        double dur = rng.NextDouble() * 2 + 1;
+        double delay = rng.NextDouble() * 10;
+        return $"left:{left:F1}%; animation-duration:{dur:F1}s; animation-delay:{delay:F1}s;";
+    }
+}
